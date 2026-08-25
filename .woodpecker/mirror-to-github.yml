@@ -1,0 +1,30 @@
+# Bitbucket is the sole source of truth for this repo — push directly into it over
+# HTTPS. Every push here re-syncs branches + tags onto GitHub at
+# github.com/devops-tashtiot/builtin-images. GitHub is branch-protected to be
+# read-only except for this pipeline's push identity — never push to it directly, and
+# the next sync would overwrite it even if you did. Same pattern as
+# a-woodpecker-plugins' .woodpecker/mirror-to-github.yml — see that file's comments
+# for the two gotchas (Woodpecker eating ${VAR} in commands unless escaped $${VAR};
+# Bitbucket DC HTTP tokens need Bearer auth, not x-token-auth in the URL).
+clone:
+  git:
+    image: harbor.devopstashtiot.page/plugins/plugin-git-cert:prod
+    settings:
+      depth: 0
+      tags: false
+
+when:
+  - event: push
+
+steps:
+  - name: Mirror to GitHub
+    image: harbor.devopstashtiot.page/base/git-cert:prod
+    environment:
+      BITBUCKET_TOKEN:
+        from_secret: bitbucket_token
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - 'git -c http.extraheader="Authorization: Bearer $${BITBUCKET_TOKEN}" clone --mirror "https://bitbucket.devopstashtiot.page/scm/devopstashtiot/builtin-images.git" repo-mirror'
+      - cd repo-mirror
+      - 'git push --prune "https://x-access-token:$${GITHUB_TOKEN}@github.com/devops-tashtiot/builtin-images.git" "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"'

@@ -11,14 +11,29 @@ instead — those have no content of their own to version independently.
 
 One question decides it — everything else follows from the answer.
 
-```mermaid
-flowchart TD
-    Q{"Are you writing this<br/>image's content yourself?"}
-    Q -->|"yes — app code, packages, scripts"| B["inbound-images (this repo)<br/>you write the Dockerfile + CA block"]
-    Q -->|"no — it's an existing upstream image"| C["outbound-images-with-ca<br/>automation writes the Dockerfile + CA block"]
-    B --> B2["write Dockerfile<br/>+ feat[base/name]: commit"]
-    C --> C2["push image to outbound_images<br/>+ one line in images.txt"]
 ```
+                    Are you writing this image's
+                          content yourself?
+                                 │
+                 ┌───────────────┴────────────────┐
+                yes                                no
+      (app code, packages,                 (existing upstream
+           scripts)                              image)
+                 │                                 │
+                 ▼                                 ▼
+      ┌───────────────────────┐        ┌──────────────────────────┐
+      │    inbound-images      │        │  outbound-images-with-ca │
+      │    (this repo)          │        │                          │
+      │ you write the           │        │ automation writes the    │
+      │ Dockerfile + CA block   │        │ Dockerfile + CA block    │
+      └────────────┬─────────────┘        └─────────────┬────────────┘
+                   │                                     │
+                   ▼                                     ▼
+        write Dockerfile +                  push image to outbound_images
+      feat[base/name]: commit                  + one line in images.txt
+```
+
+*(plain text, not Mermaid — Bitbucket Data Center doesn't render Mermaid fences in README.md, so this is kept as a fixed-width diagram that displays identically everywhere.)*
 
 | Question | `inbound-images` (this repo) | `outbound-images-with-ca` |
 |---|---|---|

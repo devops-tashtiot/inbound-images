@@ -1,0 +1,5 @@
+pr_body.txt
+new_tags.txt
+new_locations.txt
+__pycache__/
+*.pyc

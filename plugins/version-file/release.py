@@ -823,7 +823,7 @@ def release():
         # every images.txt-declared image. A repo either is images.txt-style
         # (root IS the CA version, every rotation is inherently a major event)
         # or it isn't — this is a data-driven signal (images.txt existing),
-        # not a hardcoded "this is cicd-images" special case.
+        # not a hardcoded "this is outbound-images-with-ca" special case.
         is_ca_managed = bool(declared_images) and (is_root or location in declared_images)
 
         if current:

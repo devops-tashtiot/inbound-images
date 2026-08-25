@@ -220,11 +220,17 @@ def parse_pr_body(body, parsers=None, changelog_level=None):
     return result
 
 
-def _all_versioned_dirs(scan_root, prefix=""):
-    """Recursively find every dir under scan_root that has its own VERSION.txt,
+def _all_versioned_dirs(scan_root, prefix="", indicator_file="VERSION.txt"):
+    """Recursively find every dir under scan_root that has its own <indicator_file>,
     returning paths relative to the original root (prefix-joined). Used by the
     [**] / [<prefix>/**] wildcards — the only way to reach arbitrarily deep
-    locations (e.g. a 4-level hardened image path) in one selector."""
+    locations (e.g. a 4-level hardened image path) in one selector.
+
+    indicator_file defaults to VERSION.txt (a component only becomes discoverable
+    after its first release) but is configurable via PLUGIN_COMPONENT_INDICATOR_FILE
+    — e.g. "Dockerfile" reaches a component the moment it's created, so a mass
+    rotation (breaking[**]: ...) can bump it on its true first release too, not just
+    on every release after the first."""
     found = []
     try:
         entries = sorted(os.listdir(scan_root))
@@ -235,20 +241,24 @@ def _all_versioned_dirs(scan_root, prefix=""):
         if not os.path.isdir(full):
             continue
         rel = f"{prefix}/{e}" if prefix else e
-        if os.path.exists(os.path.join(full, "VERSION.txt")):
+        if os.path.exists(os.path.join(full, indicator_file)):
             found.append(rel)
-        found.extend(_all_versioned_dirs(full, rel))
+        found.extend(_all_versioned_dirs(full, rel, indicator_file))
     return found
 
 
-def _expand_locations(location_to_commits, root_path, exclude_regex="", include_root_in_double_star=False):
+def _expand_locations(location_to_commits, root_path, exclude_regex="", include_root_in_double_star=False,
+                       indicator_file="VERSION.txt"):
     """
     Expands wildcard locations and applies SCOPE_EXCLUDE_REGEX.
 
     Wildcard rules:
-      [*]        -> all direct subdirs of root_path
-      [base/*]   -> all subdirs of root_path/base/
-      [**]       -> every dir anywhere under root_path that has its own VERSION.txt
+      [*]        -> direct subdirs of root_path that have their own <indicator_file>
+                    (a subdir without one — docs/, scripts/, anything that isn't
+                    actually a component — is silently not a candidate, same
+                    filtering [**] already applied)
+      [base/*]   -> same, restricted to direct subdirs of root_path/base/
+      [**]       -> every dir anywhere under root_path that has its own <indicator_file>
                     (+ root itself, when include_root_in_double_star is True —
                     a CA-managed repo's root VERSION.txt IS the CA version, so
                     "everything" naturally includes it: one `feat[**]:` line
@@ -257,6 +267,12 @@ def _expand_locations(location_to_commits, root_path, exclude_regex="", include_
       [base/**]  -> same, restricted to under root_path/base/ (root is never
                     implied by a scoped `**`, only the bare `[**]`)
       [""]       -> root, passes through as-is
+
+    indicator_file (PLUGIN_COMPONENT_INDICATOR_FILE, default "VERSION.txt") is what
+    every wildcard form above treats as "this directory is a real component" — see
+    _all_versioned_dirs' docstring for why a repo with no per-component release
+    history yet (nothing has a VERSION.txt) would want this set to "Dockerfile"
+    instead.
 
     SCOPE_EXCLUDE_REGEX is applied to ALL locations including root ("").
     Returns new dict with wildcards replaced by concrete locations.
@@ -274,17 +290,18 @@ def _expand_locations(location_to_commits, root_path, exclude_regex="", include_
         subdirs = None
 
         if loc == "**":
-            subdirs = _all_versioned_dirs(root_path)
+            subdirs = _all_versioned_dirs(root_path, indicator_file=indicator_file)
             if include_root_in_double_star:
                 subdirs = [""] + subdirs
         elif loc.endswith("/**"):
             parent = loc[:-3]
-            subdirs = _all_versioned_dirs(os.path.join(root_path, parent), parent)
+            subdirs = _all_versioned_dirs(os.path.join(root_path, parent), parent, indicator_file)
         elif loc == "*":
             try:
                 subdirs = sorted(
                     e for e in os.listdir(root_path)
                     if os.path.isdir(os.path.join(root_path, e))
+                    and os.path.exists(os.path.join(root_path, e, indicator_file))
                 )
             except OSError:
                 subdirs = []
@@ -295,6 +312,7 @@ def _expand_locations(location_to_commits, root_path, exclude_regex="", include_
                 subdirs = sorted(
                     f"{parent}/{e}" for e in os.listdir(scan_dir)
                     if os.path.isdir(os.path.join(scan_dir, e))
+                    and os.path.exists(os.path.join(scan_dir, e, indicator_file))
                 )
             except OSError:
                 subdirs = []
@@ -697,6 +715,7 @@ def release():
     initial_tag_version = os.getenv("PLUGIN_INITIAL_TAG", "1.0.0").lstrip("v")
     version_prefix       = "v" if os.getenv("PLUGIN_V_PREFIX", "true").lower() == "true" else ""
     mirror_registry       = os.getenv("PLUGIN_MIRROR_REGISTRY", "")
+    component_indicator_file = os.getenv("PLUGIN_COMPONENT_INDICATOR_FILE", "VERSION.txt")
 
     _bundled_toml = os.path.join(os.path.dirname(__file__), "cliff.toml")
     global_toml   = os.getenv("PLUGIN_CLIFF_TOML") or ("./cliff.toml" if os.path.exists("./cliff.toml") else _bundled_toml)
@@ -713,6 +732,7 @@ def release():
     if changelog_levels:
         print(f">>> PLUGIN_CHANGELOG_LEVEL={','.join(str(l) for l in sorted(changelog_levels))}")
     print(f">>> PLUGIN_BASE_PATH='{root_path}' — root directory; all [location] paths are resolved relative to this")
+    print(f">>> PLUGIN_COMPONENT_INDICATOR_FILE='{component_indicator_file}' — what [**] treats as \"this dir is a component\"")
 
     # ── Scaffold any brand-new locations declared in images.txt (no-op if absent) ──
     declared_images = _load_declared_images(root_path)
@@ -735,6 +755,7 @@ def release():
     location_to_commits = _expand_locations(
         location_to_commits, root_path, exclude_regex,
         include_root_in_double_star=bool(declared_images),
+        indicator_file=component_indicator_file,
     )
 
     if not location_to_commits:

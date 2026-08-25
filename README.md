@@ -83,9 +83,9 @@ every declared image on a rotation.
    `cloudflare-origin-ca-rsa-root.pem`).
 3. Commit with `breaking[**]: <why>` — the `**` wildcard (already implemented in
    `scripts/version-file/release.py`, not something built for this) means "every
-   directory anywhere under `PLUGIN_BASE_PATH` that **already has its own `VERSION.txt`**"
-   — which, in this repo today, is all 15 components at once. `breaking` forces a major
-   bump on every one of them, same as any other `breaking` commit.
+   directory anywhere under `PLUGIN_BASE_PATH` that has its own
+   `PLUGIN_COMPONENT_INDICATOR_FILE`". `breaking` forces a major bump on every one of
+   them, same as any other `breaking` commit.
 4. Open a PR as normal. Verified locally: a single `breaking[**]: ...` message correctly
    produced 15 tags (`base-uv-python-38-v2.0.0` through `plugins-version-file-v2.0.0`),
    one per component, all in the same run.
@@ -93,21 +93,32 @@ every declared image on a rotation.
 Unlike `outbound-images-with-ca` (where the CA rotation and the image rebuild are two
 separate, automatic pipeline steps), here the rotation *is* just an ordinary `[**]`-target
 commit — there's no separate "detect the cert changed" trigger, because `version-file`
-doesn't need one: naming `**` in the message is already enough to reach everything
-**that's already been released at least once.**
+doesn't need one: naming `**` in the message is already enough to reach everything.
 
-### `[**]` does NOT reach a component's first release — verified
+### How `[**]` (and `[*]`) find components: `PLUGIN_COMPONENT_INDICATOR_FILE`
 
-`_all_versioned_dirs` (what `[**]` expands to) only ever finds directories that
-**already have a `VERSION.txt`** — it has no way to discover a brand-new component that
-was never explicitly targeted. Confirmed live: a fresh folder with only a `Dockerfile`
-and no `VERSION.txt` yet, targeted with `breaking[**]: ...`, produced
-`"No components to release after expansion/filtering"` — a **silent no-op**, not an
-error. A new component has to get one explicit, by-name first release —
-`feat[plugins/newthing]: initial release` — before it's visible to `[**]` at all. Only
-*after* that does a future CA rotation reach it automatically. `scripts/check-onboarded.sh`
-(below) surfaces any component that's fallen into this gap, so it doesn't stay invisible
-indefinitely.
+`_all_versioned_dirs` (what `[**]`/`[base/**]` expand to, and — see below — what
+`[*]`/`[base/*]` filter by too) doesn't scan for components directly; it treats
+whatever file `PLUGIN_COMPONENT_INDICATOR_FILE` names as the signal "this directory is
+a real component." Two real options, with a real tradeoff:
+
+- **`VERSION.txt`** (the library default) — only exists *after* a component's first
+  release. Simple, but means `[**]` **cannot reach a component's own first release** —
+  confirmed live: a fresh folder with only a `Dockerfile` and no `VERSION.txt` yet,
+  targeted with `breaking[**]: ...`, produced `"No components to release after
+  expansion/filtering"` — a **silent no-op**, not an error.
+- **`Dockerfile`** (what this repo actually sets, in `.woodpecker/build.yaml`'s
+  `version` step) — exists from the moment a component is created, so `[**]` reaches it
+  on its true first release too. Also verified live: the same fresh-folder case, rerun
+  with `PLUGIN_COMPONENT_INDICATOR_FILE=Dockerfile`, correctly found it, computed
+  `1.0.0`, and wrote `VERSION.txt` for the first time — no separate by-name commit
+  needed first.
+
+This applies to `[*]`/`[base/*]` too, not just `[**]` — a direct subdir *without* the
+indicator file (a `docs/` or `scripts/` folder sitting next to real components, say) is
+silently excluded from the expansion, the same filtering `**` already applied. Also
+verified live: `[plugins/*]` against a folder with a `Dockerfile` and a sibling folder
+with only a `README.md` correctly targeted just the former.
 
 ## Commit message format
 
@@ -136,8 +147,7 @@ inbound-images/
 ├── certs/cloudflare-origin-ca-rsa-root.pem   # the canonical cert every component's own copy must match
 ├── scripts/
 │   ├── version-file/                 # vendored orchestrator (release.py, cliff.toml, tests)
-│   ├── check-ca-injection.sh         # CI gate: every Dockerfile injects the CA, no stale copies
-│   └── check-onboarded.sh            # informational: flags components [**] can't reach yet
+│   └── check-ca-injection.sh         # CI gate: every Dockerfile injects the CA, no stale copies
 ├── base/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, VERSION.txt, CHANGELOG.md}
 ├── plugins/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, VERSION.txt, CHANGELOG.md, ...}
 └── .woodpecker/build.yaml

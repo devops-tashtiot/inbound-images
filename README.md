@@ -50,13 +50,20 @@ component built from an unusual base. **This is enforced in CI, not just documen
 `.woodpecker/build.yaml`'s `check-ca` step runs `scripts/check-ca-injection.sh` before
 anything else, and **fails the build** if any component:
 
-- has no CA injection at all. **No exemption mechanism exists** — a speculative
-  "this one doesn't need it" escape hatch was considered and dropped: nothing in this
-  repo has ever actually needed one (not even the two `kaniko-*` plugins, which have no
-  OS trust store at all — no `update-ca-*` binary, no `/etc/os-release` — and still
-  inject the CA correctly, see below), and an unused exemption is a silent, unreviewed
-  way for a real gap to slip through later. If a genuine no-CA-possible case ever shows
-  up, add the check for it then, against the real constraint.
+- has no CA injection at all. **This is a real check, not a loose grep** — it strips
+  comments first, then requires one of a fixed set of genuine patterns to appear on an
+  actual `RUN`/`COPY` instruction: `update-ca-trust`, `update-ca-certificates`, a
+  `COPY` into a known OS trust-store path, or a `RUN` appending into the known Alpine
+  bundle. A Dockerfile that only *mentions* the cert — in a comment, or `COPY`d
+  somewhere inert like `/tmp/` — now fails instead of incidentally passing (verified:
+  both of those exact cases were constructed and confirmed to fail). **No exemption
+  mechanism exists** — a speculative "this one doesn't need it" escape hatch was
+  considered and dropped: nothing in this repo has ever actually needed one (not even
+  the two `kaniko-*` plugins, which have no OS trust store at all — no `update-ca-*`
+  binary, no `/etc/os-release` — and still inject the CA correctly, see below), and an
+  unused exemption is a silent, unreviewed way for a real gap to slip through later. If
+  a genuine no-CA-possible case ever shows up, add the check for it then, against the
+  real constraint.
 - *does* inject a CA, but from a local copy that's gone stale — i.e. its own
   `<component>/cloudflare-origin-ca-rsa-root.pem` no longer byte-matches the real
   `certs/cloudflare-origin-ca-rsa-root.pem`. This is the failure mode that actually

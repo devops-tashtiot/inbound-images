@@ -18,15 +18,33 @@ set -eu
 ROOT_CERT="certs/cloudflare-origin-ca-rsa-root.pem"
 status=0
 
+# Real injection is one of exactly these, matched only against actual RUN/COPY
+# instruction lines (comments and unrelated text stripped first, below) — NOT a
+# loose "does the cert filename appear anywhere" grep. A Dockerfile that only
+# mentions the cert in a comment, or COPYs it somewhere inert, now fails instead of
+# incidentally passing:
+#   - a real `RUN update-ca-trust` / `RUN update-ca-certificates` command
+#   - a real `COPY` whose destination is a known OS trust-store path
+#   - a real `RUN` appending into the known Alpine-style bundle file
+REAL_INJECTION_PATTERNS='^RUN[[:space:]].*update-ca-trust
+^RUN[[:space:]].*update-ca-certificates
+^COPY[[:space:]].*[[:space:]]/etc/pki/ca-trust/source/anchors/
+^COPY[[:space:]].*[[:space:]]/usr/local/share/ca-certificates/
+^COPY[[:space:]].*[[:space:]]/kaniko/ssl/certs/
+^RUN[[:space:]].*>>[[:space:]]*/etc/ssl/certs/ca-certificates\.crt'
+
 for dockerfile in base/*/Dockerfile plugins/*/Dockerfile; do
     [ -f "$dockerfile" ] || continue
     dir="$(dirname "$dockerfile")"
 
-    if ! grep -qi "cloudflare-origin-ca\|update-ca-certificates\|update-ca-trust" "$dockerfile"; then
-        echo "FAIL: $dockerfile does not inject the CA."
-        echo "      See README 'Every image here trusts the CA' for the three patterns"
-        echo "      already in use (including the two kaniko plugins, which have no OS"
-        echo "      trust store at all and still manage it)."
+    real_instructions="$(grep -Ev '^[[:space:]]*(#|$)' "$dockerfile")"
+    if ! printf '%s\n' "$real_instructions" | grep -Eq "$REAL_INJECTION_PATTERNS"; then
+        echo "FAIL: $dockerfile does not actually inject the CA (a comment mentioning it"
+        echo "      doesn't count, and neither does COPYing it somewhere that isn't a"
+        echo "      known trust-store destination)."
+        echo "      See README 'Every image here trusts the CA' for the patterns this"
+        echo "      check accepts, including the two kaniko plugins' COPY into"
+        echo "      /kaniko/ssl/certs/, with no OS trust store at all."
         status=1
         continue
     fi

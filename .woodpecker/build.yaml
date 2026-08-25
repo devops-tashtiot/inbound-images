@@ -5,11 +5,23 @@ when:
   - event: [push, pull_request, manual]
 
 steps:
+  # ── Every Dockerfile must inject the CA, using a copy that's actually in sync ────
+  # Blocking, unlike outbound-images-with-ca's escape-hatch guards (which were dropped
+  # in favor of PR review) — every Dockerfile here is hand-written, none of them are
+  # auto-generated-and-therefore-trusted-by-construction, so nothing else catches a
+  # missing or stale CA block. check-onboarded.sh is informational only (never fails
+  # the build) — it just surfaces components [**] can't yet reach on a CA rotation.
+  - name: check-ca
+    image: alpine:3
+    commands:
+      - sh scripts/check-ca-injection.sh
+      - sh scripts/check-onboarded.sh
+
   # version-file lives directly in this repo (scripts/version-file/) rather than as a
   # published plugin image — same "vendored, not pulled" pattern outbound-images-with-ca uses for
   # fan_out.py.
   - name: version
-    image: harbor.devopstashtiot.page/inbound_images/base/python3.11:latest
+    image: harbor.devopstashtiot.page/inbound_images/base/uv-python-311:latest
     environment:
       PLUGIN_BASE_PATH: .
       PLUGIN_CHANGELOG_LEVEL: "2"

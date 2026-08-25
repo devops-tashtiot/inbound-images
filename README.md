@@ -50,12 +50,13 @@ component built from an unusual base. **This is enforced in CI, not just documen
 `.woodpecker/build.yaml`'s `check-ca` step runs `scripts/check-ca-injection.sh` before
 anything else, and **fails the build** if any component:
 
-- has no CA injection at all, and no `NO_CA_NEEDED` marker file explicitly claiming (with
-  a real, reviewed reason) that it doesn't need one — "distroless, no shell, no OS cert
-  store" is **not** by itself a valid reason to skip: the two `kaniko-*` plugins are
-  exactly that (no update-ca-* binary, no `/etc/os-release` at all) and still inject the
-  CA correctly (see below) — `NO_CA_NEEDED` is only for a component that provably makes
-  no TLS calls of its own, ever.
+- has no CA injection at all. **No exemption mechanism exists** — a speculative
+  "this one doesn't need it" escape hatch was considered and dropped: nothing in this
+  repo has ever actually needed one (not even the two `kaniko-*` plugins, which have no
+  OS trust store at all — no `update-ca-*` binary, no `/etc/os-release` — and still
+  inject the CA correctly, see below), and an unused exemption is a silent, unreviewed
+  way for a real gap to slip through later. If a genuine no-CA-possible case ever shows
+  up, add the check for it then, against the real constraint.
 - *does* inject a CA, but from a local copy that's gone stale — i.e. its own
   `<component>/cloudflare-origin-ca-rsa-root.pem` no longer byte-matches the real
   `certs/cloudflare-origin-ca-rsa-root.pem`. This is the failure mode that actually

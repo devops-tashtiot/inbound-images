@@ -98,6 +98,24 @@ All 15 components currently pass. The exact injection technique differs by base 
 directory `SSL_CERT_DIR` already points at; Go's `crypto/x509` reads every file in it
 directly, no "update" step exists or is needed).
 
+### If the cert file is ever renamed
+
+`scripts/check-ca-injection.sh` reads the filename from `PLUGIN_CA_CERT_FILENAME`
+(set in `.woodpecker/build.yaml`'s `check-ca` step, default
+`cloudflare-origin-ca-rsa-root.pem`) — that one variable is the only place *this
+script* needs to change on a rename; verified live (pointed it at a name that doesn't
+exist, confirmed the check correctly fails with a clear "does not exist" message
+instead of silently passing against the old file).
+
+Two things still need editing by hand regardless, and can't be made one-place — not
+an oversight, a real Woodpecker/Dockerfile constraint:
+- **Every component's own `Dockerfile`** — its `COPY` line names the file directly, so
+  a rename means updating all 15 (or however many exist by then) by hand, same as
+  updating their cert content on a rotation.
+- Nothing in `outbound-images-with-ca`'s `.woodpecker/build.yaml` needs this (it has no
+  equivalent check script), but that repo's own `when.path` gate entries are similarly
+  static YAML — see its README for the same caveat.
+
 ## How to rotate the CA for every image here (not just one)
 
 An ordinary commit message (`feat[base/uv-python-311]: ...`) only ever bumps the one

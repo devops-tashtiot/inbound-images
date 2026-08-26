@@ -69,6 +69,13 @@ steps:
       PLUGIN_REGISTRY: harbor.devopstashtiot.page
       PLUGIN_REPO: inbound_images
       PLUGIN_TAGS_FILE: new_tags.txt
+      # Every step in this pipeline (this one included, plus `version`) references its
+      # plugin image by :latest, not a specific version — without this alias,
+      # buildah-master-versions only ever pushes the exact version tag (e.g. :1.0.0)
+      # and :latest would never exist at all, breaking every run forever, not just the
+      # first one. Matches a-woodpecker-plugins' own publish.yml convention (which uses
+      # PLUGIN_ALIASES: "prod" for the same reason, against a :prod reference instead).
+      PLUGIN_ALIASES: "latest"
       PLUGIN_USERNAME:
         from_secret: harbor_username
       PLUGIN_PASSWORD:

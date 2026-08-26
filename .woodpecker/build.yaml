@@ -5,17 +5,28 @@ when:
   - event: [push, pull_request, manual]
 
 steps:
-  # version-file lives directly in this repo (scripts/version-file/) rather than as a
-  # published plugin image — same "vendored, not pulled" pattern outbound-images-with-ca uses for
-  # fan_out.py. PLUGIN_COMPONENT_INDICATOR_FILE=Dockerfile (not the default VERSION.txt)
-  # so [**] discovers a component the moment its Dockerfile exists — a mass CA rotation
+  # version-file runs as a real published plugin image now — plugins/version-file is
+  # one of this repo's own 15 components (built by build-and-push, below, same as
+  # everything else), consumed here the same way master-versions/buildah-master-versions
+  # already are: environment: only, no commands:, its own ENTRYPOINT does the work.
+  # It used to be vendored at scripts/version-file/ instead (same reasoning
+  # outbound-images-with-ca's fan_out.py-successors still use); moved to plugins/ so
+  # it's a real tracked, versioned component instead of a copy with no version of its
+  # own. NOTE — real bootstrap requirement: this step can't run before
+  # plugins/version-file has been built and pushed to Harbor at least once (nothing
+  # can build it except this same pipeline, which needs it to run) — seed it manually
+  # the first time (e.g. `docker build` + push plugins/version-file directly, or a
+  # one-off manual pipeline run against just that folder) before relying on this step.
+  #
+  # PLUGIN_COMPONENT_INDICATOR_FILE=Dockerfile (not the default VERSION.txt) so [**]
+  # discovers a component the moment its Dockerfile exists — a mass CA rotation
   # (breaking[**]: ...) reaches a component on its true first release too, not just on
   # every release after the first. See README "How [**] finds components".
   # PLUGIN_OUTPUT_LOCATIONS_FILE records exactly which component(s) this run actually
   # resolved to (already-implemented, not new) — check-ca (next) scopes itself to just
   # those, instead of re-checking every component in the repo on every push.
   - name: version
-    image: harbor.devopstashtiot.page/inbound_images/base/uv-python-311:latest
+    image: harbor.devopstashtiot.page/inbound_images/plugins/version-file:latest
     environment:
       PLUGIN_BASE_PATH: .
       PLUGIN_CHANGELOG_LEVEL: "2"
@@ -25,8 +36,6 @@ steps:
       PLUGIN_COMPONENT_INDICATOR_FILE: Dockerfile
       PLUGIN_BITBUCKET_TOKEN:
         from_secret: bitbucket_token
-    commands:
-      - python3 scripts/version-file/release.py
 
   # ── Only the Dockerfile(s) THIS run actually targeted must inject the CA ─────────
   # Blocking, unlike outbound-images-with-ca's escape-hatch guards (which were dropped

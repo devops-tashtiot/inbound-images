@@ -150,7 +150,7 @@ every declared image on a rotation.
    (each Dockerfile `COPY`s a local copy, not the repo-root one — see each folder's own
    `cloudflare-origin-ca-rsa-root.pem`).
 3. Commit with `breaking[**]: <why>` — the `**` wildcard (already implemented in
-   `scripts/version-file/release.py`, not something built for this) means "every
+   `version-file`'s own `release.py`, not something built for this) means "every
    directory anywhere under `PLUGIN_BASE_PATH` that has its own
    `PLUGIN_COMPONENT_INDICATOR_FILE`". `breaking` forces a major bump on every one of
    them, same as any other `breaking` commit.
@@ -197,15 +197,57 @@ feat[plugins/master-versions]!: drop legacy shallow-clone self-heal
 ```
 
 Identical grammar to `master-versions` (`type[location]: description`, multi-location,
-`!` forces major) — see [`scripts/version-file/README.md`](scripts/version-file/README.md)
+`!` forces major) — see [`plugins/version-file/README.md`](plugins/version-file/README.md)
 for the exact rules (wildcards, the three version-resolution cases, etc).
 
-## `scripts/version-file/` — the orchestrator, vendored not pulled
+## `master-versions` vs. `version-file` — which plugin does what, and why two exist
 
-`version-file`'s own source lives directly in this repo, the same "not a published
-dependency" pattern `outbound-images-with-ca` uses for `fan_out.py`. It reads each targeted
-component's own `VERSION.txt` (not a git tag) to find its current version, bumps it via
-git-cliff, and writes both `VERSION.txt` and `CHANGELOG.md` back.
+Both plugins parse the identical `type[location]: description` grammar and both hand the
+actual bump math off to git-cliff — the difference is entirely in **where each one reads
+"what's the current version" from**, and that one difference is why this repo can't just
+reuse `master-versions` unmodified.
+
+| | `master-versions` | `version-file` |
+|---|---|---|
+| Lives in | `a-woodpecker-plugins/plugins/master-versions/` | `inbound-images/plugins/version-file/` (this repo) |
+| Current version comes from | `git describe` against a per-component-prefixed git tag (e.g. `plugins-docker-v1.4.0`) | that component's own `VERSION.txt` file, read directly |
+| Needs branch-ancestry-aware fetch/checkout, shallow-clone self-heal | yes — `git describe` has to walk real history, which a CI checkout may have truncated | no — reading a file needs none of that |
+| Uses a git tag at all | yes, both to look up the current version and to publish the new one | only a throwaway *local*, never-pushed tag, created and deleted within one component's own processing, purely to give `git cliff --bump` something to compute a diff against |
+| Used by | `a-woodpecker-plugins` itself, and `outbound-images-with-ca` (single root/`certs` location, one bare `v<version>` tag, no per-image tags) | `inbound-images` (this repo) — many independent components, each versioned on its own schedule |
+| Wildcards | none — every location is named explicitly | `[*]`/`[base/*]` (one level) and `[**]`/`[base/**]` (recursive), gated by `PLUGIN_COMPONENT_INDICATOR_FILE` — see below |
+
+**Why `inbound-images` uses the file-based one, not `master-versions`:** this repo is
+expected to keep growing — many base images and plugins (15 today), each bumped
+independently and often, all in one repo. Tracking each one via a prefixed git tag (the way
+`master-versions` does) means every lookup has to filter a single shared tag namespace —
+`git describe --match 'plugins-docker-v*'` has to search past every *other* component's
+tags to find the ones that belong to just this one. `VERSION.txt` sidesteps that
+entirely: `plugins/docker/VERSION.txt` just says `2.0.0` — no pattern-matching, no shared
+namespace, and no dependency on how much git history the CI checkout happened to fetch.
+
+**Why `outbound-images-with-ca` still uses `master-versions`, not `version-file`:** the
+reverse situation — that repo only ever tracks *one* thing (the CA's own version), so
+there's no shared-namespace problem to avoid, and a git tag is the natural way to record
+"what CA version is the repo currently on" for anyone inspecting it from outside the repo.
+
+## `plugins/version-file/` — the orchestrator, published like any other plugin here
+
+`version-file` isn't a hand-maintained script vendored into this repo — it's one of
+`inbound-images`' own 15 components, versioned and built by this same pipeline
+(`build-and-push`, below) exactly like every other plugin. The `version` step (the first
+step in `.woodpecker/build.yaml`) consumes its published image the same way
+`compute-ca-version`/`build-and-push` in `outbound-images-with-ca` consume theirs:
+`environment:` only, no `commands:` — the image's own `ENTRYPOINT` does the work. It reads
+each targeted component's own `VERSION.txt` (not a git tag) to find its current version,
+bumps it via git-cliff, and writes both `VERSION.txt` and `CHANGELOG.md` back.
+
+**Bootstrap note:** because `plugins/version-file` is built by the very pipeline step that
+needs to consume it, a truly fresh clone of this repo can't run the `version` step until
+that image exists in Harbor at least once — there's nothing else that can build it first.
+Seed it manually one time (build and push `plugins/version-file` directly, or run a
+one-off pipeline scoped to just that folder) before relying on the `version` step normally.
+This is a one-time, first-run-only concern — every release after that first image exists
+works exactly as described above.
 
 ## Layout
 
@@ -214,11 +256,11 @@ inbound-images/
 ├── cliff.toml                      # feat/fix/breaking — the a-woodpecker-plugins standard
 ├── certs/cloudflare-origin-ca-rsa-root.pem   # the canonical cert every component's own copy must match
 ├── scripts/
-│   ├── version-file/                 # vendored orchestrator (release.py, cliff.toml, tests)
 │   ├── inject-ca.sh                  # the canonical generic injector every component's own copy must match
 │   └── check-ca-injection.sh         # CI gate: every Dockerfile injects the CA, no stale copies
 ├── base/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, inject-ca.sh, VERSION.txt, CHANGELOG.md}
 ├── plugins/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, inject-ca.sh, VERSION.txt, CHANGELOG.md, ...}
+│   └── version-file/                 # the orchestrator itself — a real, published component like any other
 └── .woodpecker/build.yaml
 ```
 

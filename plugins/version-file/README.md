@@ -2,9 +2,26 @@
 
 Woodpecker CI plugin that parses a PR description, calculates semantic versions via git-cliff, writes `CHANGELOG.md` files per component, and records created tags for downstream steps — the same job `master-versions` does, but the "what version is this component at right now" question is answered by reading a **file**, not by resolving a git tag.
 
+## master-versions vs version-file — which to use where
+
+| | `master-versions` | `version-file` |
+|---|---|---|
+| Current-version source | A git tag (`<slug>-v1.2.3`), resolved via `git describe` against branch ancestry | A plain `<location>/VERSION.txt` file in the working tree |
+| Needs `PLUGIN_BITBUCKET_TOKEN` on every event? | Yes — authenticates the branch fetch used for tag resolution | No — only for `pull_request`'s PR-description fetch |
+| Clone settings (`partial`/`depth`/`tags`) | Self-heals a shallow/partial clone automatically, but still needs real ancestry | Genuinely irrelevant — no ancestry is ever read |
+| Hotfix on an old release | Cut the branch from the release's **tag** (`git checkout -b ... <tag>`) | Cut the branch from the **commit** where `VERSION.txt` held that value — no tag lookup needed |
+| Multiple images sharing one version, all moving together (e.g. a CA cert rotation) | Not supported — every component's version is independent | `images.txt` + `[**]`: root's `VERSION.txt` **is** the shared version; every declared image force-bumps in lockstep |
+| Scaffolding a new component | Create the directory yourself | List it in `images.txt` — the plugin creates the folder + empty `VERSION.txt` for you |
+| Generating a component's `Dockerfile` | Not supported — write it yourself | `Dockerfile.template` + `{{FROM_IMAGE}}` substitution, regenerated automatically unless hand-edited |
+| A location whose own path looks like a version (`0.11.29`, `2.9.3`) | ⚠️ known, currently-unfixed limitation — `feat`/`breaking` silently bump as patch instead (see `master-versions`'s `BUGS_AND_FIXES.md` §5) | Fixed — the git-cliff-facing name is sanitized (dots → underscores) so this never happens |
+
+**Use `master-versions`** for an ordinary "builtin" repo where every component is independently versioned and released through its own commit history.
+
+**Use `version-file`** for a "hardened"/`images.txt`-style repo where a set of images must all track one shared root version (rebuilt together whenever, say, a CA cert rotates), or simply when you'd rather version resolution not depend on git tag/branch ancestry at all.
+
 ### What is a VERSION.txt?
 
-`<location>/VERSION.txt` is a one-line file holding a component's current version (e.g. `1.2.0`, no `v` prefix stored on disk — that's added back on output). It's the single source of truth for "where is this component right now": no `git describe`, no branch fetch, no shallow-clone unshallowing, no PR-target-branch checkout. Whatever the file says *is* the current version, because it's just read off the working tree that's already checked out.
+`<location>/VERSION.txt` is a one-line file holding a component's current version (e.g. `1.2.0`, no `v` prefix stored on disk — that's added back on output). It's the single source of truth for "where is this component right now": no `git describe`, no branch fetch, no shallow-clone unshallowing. Whatever the file says *is* the current version, because it's just read off the working tree that's already checked out.
 
 ### What is a CHANGELOG.md?
 
@@ -32,10 +49,11 @@ In a monorepo, each component has its own independent `VERSION.txt`/`CHANGELOG.m
 
 > ### ⚠️ Required one-time Bitbucket setup
 > A real release only happens on a `push` to `main` after a PR merge — and that step reads the
-> PR description out of the **merge commit itself**. This only works if the repository's PR merge
-> strategy is set to **Squash**, with a custom commit message template that injects the PR
-> description under a `DESCRIPTION` marker. Without this, every merge "succeeds" but silently
-> releases nothing. Full steps and the exact template: [§6](#6-triggering-events--manual-pull_request-and-push-merge).
+> PR description out of the **merge commit itself**. This requires a custom commit message
+> template that injects the PR description under a `DESCRIPTION` marker, with **commit summaries
+> disabled** so nothing gets appended after it — not tied to any particular merge strategy.
+> Without this, every merge "succeeds" but silently releases nothing. Full steps and the exact
+> template: [§7A](#7-tutorial--set-up-bitbucket-add-the-pipeline-release-a-hotfix).
 
 ---
 
@@ -47,11 +65,9 @@ In a monorepo, each component has its own independent `VERSION.txt`/`CHANGELOG.m
 4. [PLUGIN_CHANGELOG_LEVEL enforcement](#4-plugin_changelog_level-enforcement)
 5. [Variables](#5-variables)
 6. [Triggering events — manual, pull_request, and push (merge)](#6-triggering-events--manual-pull_request-and-push-merge)
-7. [Tutorial — squash-merge setup, building the pipeline, releasing a hotfix](#7-tutorial--squash-merge-setup-building-the-pipeline-releasing-a-hotfix)
+7. [Tutorial — set up Bitbucket, add the pipeline, release a hotfix](#7-tutorial--set-up-bitbucket-add-the-pipeline-release-a-hotfix)
 8. [Cross-referencing with changed-files](#8-cross-referencing-with-changed-files)
-9. [Pipeline — standalone](#9-pipeline--standalone)
-10. [Pipeline — with buildah-master-versions (optional)](#10-pipeline--with-buildah-master-versions-optional)
-11. [Examples](#11-examples)
+9. [Examples](#9-examples)
 
 
 ---
@@ -100,12 +116,12 @@ When a part is bumped, all lower parts reset to `0`. **One exception:** a compon
 | `[plugins/docker]` | Component at `PLUGIN_BASE_PATH/plugins/docker/` → `plugins/docker/VERSION.txt` |
 | `[]` | Repo root (`PLUGIN_BASE_PATH` itself) → `VERSION.txt` at the root |
 | `[nati, check]` | Releases **both** `nati` and `check` from one line |
-| `[*]` | Wildcard — every direct subdir of `PLUGIN_BASE_PATH` that already has a `VERSION.txt` |
+| `[*]` | Wildcard — direct subdirs of `PLUGIN_BASE_PATH` that already have a `VERSION.txt` |
 | `[plugins/*]` | Wildcard — same, scoped to `PLUGIN_BASE_PATH/plugins/` |
 | `[**]` | Wildcard — **every** dir anywhere under `PLUGIN_BASE_PATH` with its own `VERSION.txt`, at any depth |
 | `[base/**]` | Wildcard — same, scoped to under `PLUGIN_BASE_PATH/base/` |
 
-Unlike `master-versions`, there is no tag to look at — the location just tells the plugin which `VERSION.txt` to read and write. See [§3](#3-wildcard-expansion) for the full wildcard rules (including how `[*]`/`[**]` decide what counts as "a component" at all).
+Unlike `master-versions`, there is no tag to look at — the location just tells the plugin which `VERSION.txt` to read and write. See [§3](#3-wildcard-expansion) for the full wildcard rules, including how `[*]`/`[**]` decide what counts as "a component" at all.
 
 ### Format rules
 
@@ -166,7 +182,7 @@ checkcheck[plugins/nati]: should be continuation
 
 Both lines land in `plugins/nati/CHANGELOG.md` under the same entry. `checkcheck[...]` is preserved verbatim in the changelog body.
 
-**A wildcard token is exempt from `PLUGIN_CHANGELOG_LEVEL` depth-gating** — `[*]`, `[**]`, `[base/**]` have no depth of their own; whatever concrete locations they expand to are what get depth-checked (in practice this rarely matters, since a wildcard usually needs no depth restriction at all). See [§4](#4-plugin_changelog_level-enforcement).
+**A wildcard token is exempt from `PLUGIN_CHANGELOG_LEVEL` depth-gating** — `[*]`, `[**]`, `[base/**]` have no depth of their own; whatever concrete locations they expand to are what get depth-checked. See [§4](#4-plugin_changelog_level-enforcement).
 
 ---
 
@@ -180,7 +196,7 @@ Both lines land in `plugins/nati/CHANGELOG.md` under the same entry. `checkcheck
 | `[base/*]` | Same, scoped to direct subdirs of `PLUGIN_BASE_PATH/base` |
 | `[**]` | **Every** dir anywhere under `PLUGIN_BASE_PATH` with its own indicator file, at any depth — the only selector that reaches an arbitrarily deep location (e.g. a 4-level `dockerhub/org/image/tag` hardened path) in one go |
 | `[base/**]` | Same, scoped to under `PLUGIN_BASE_PATH/base` |
-| `[]` | Root (`PLUGIN_BASE_PATH` itself), passes through as-is — never implied by a bare `[**]` unless `images.txt` exists (see below) |
+| `[]` | Root (`PLUGIN_BASE_PATH` itself), passes through as-is |
 
 **"Indicator file" is what decides whether a directory counts as a real component at all** — by default `VERSION.txt` (a component only becomes wildcard-discoverable *after* its first release), configurable via `PLUGIN_COMPONENT_INDICATOR_FILE`. Set it to `Dockerfile` if you want a mass rotation (e.g. `breaking[**]: ...`) to also reach a component on its true first release, not just every release after the first — the moment a `Dockerfile` exists is earlier than the moment a `VERSION.txt` exists.
 
@@ -244,10 +260,7 @@ especially useful here since `images.txt`-declared hardened images routinely liv
 PLUGIN_CHANGELOG_LEVEL=0,4
 
 feat[]: rotate CA                                    → ACCEPT (depth 0 ∈ {0,4})
-feat[dockerhub/woodpeckerci/plugin-git/2.9.3]: image  → ACCEPT (depth 4 ∈ {0,4}) — but see the
-                                                         images.txt guard in §5: naming a declared
-                                                         image directly like this is rejected outright.
-feat[nati]: add dashboard                             → SKIP   (depth 1 ∉ {0,4})
+feat[nati]: add dashboard                            → SKIP   (depth 1 ∉ {0,4})
 ```
 
 ---
@@ -260,18 +273,16 @@ feat[nati]: add dashboard                             → SKIP   (depth 1 ∉ {0
 |----------|-------------|
 | `PLUGIN_BASE_PATH` | Root directory all `[location]` paths are resolved against, and where `VERSION.txt`, the root `CHANGELOG.md` index, `images.txt`, and `Dockerfile.template` (if used) all live. |
 | `PLUGIN_CHANGELOG_LEVEL` | Enforces the expected path depth of every concrete `[location]`. A single depth (`2`) or a comma-separated set of depths (`0,4`); a location is accepted if its depth is in the set. Lines with non-matching depth are skipped. If not set the plugin exits with code 1. |
+| `PLUGIN_MESSAGE` | Required only for a `manual` run — the text to parse. Not used for `pull_request` or `push` events (those retrieve the message themselves). See [§6](#6-triggering-events--manual-pull_request-and-push-merge). |
+| `PLUGIN_BITBUCKET_TOKEN` | Required only for `pull_request` events — fetches the PR description from Bitbucket. **Unlike `master-versions`, not needed on `manual`/`push` events**: there's no branch-ancestry tag resolution here to authenticate, so the current version is read straight off `VERSION.txt` in the checked-out tree. |
 
-### Message retrieval
+**Clone settings genuinely don't matter — more so than for `master-versions`.** There's no branch-ancestry resolution, no shallow-clone unshallowing, no PR-target-branch checkout at all: the only git operation this plugin performs is creating and immediately deleting one local, ephemeral tag per bumped component, needing nothing more than a plain local repo. `partial`, `depth`, and `tags` can be anything.
 
-Identical mechanism to `master-versions` — the plugin retrieves its own message; there's no file-path input for it. It dispatches on `CI_PIPELINE_EVENT`:
-
-| `CI_PIPELINE_EVENT` | Source | Required variables |
-|---|---|---|
-| `pull_request` | Fetched from the Bitbucket Server REST API (`GET .../pull-requests/{id}`), using the PR's `description` field. | `PLUGIN_BITBUCKET_TOKEN`, `CI_FORGE_URL`, `CI_REPO_OWNER`, `CI_REPO_NAME`, `CI_COMMIT_PULL_REQUEST` |
-| `manual` (default) | The `PLUGIN_MESSAGE` env var, used as-is. On a manual run the plugin loudly echoes the full message back — a banner and every line numbered between `BEGIN PLUGIN_MESSAGE` / `END PLUGIN_MESSAGE` markers — so you can see exactly what was submitted. | `PLUGIN_MESSAGE` |
-| any other event (e.g. `push`) | `git log -1 --pretty=%B`. If the commit message contains a `DESCRIPTION` section, only the text after that marker is used; otherwise the full commit message is used (with a yellow `WARNING` printed). | *(none — reads local git history)* |
-
-**Unlike `master-versions`, `PLUGIN_BITBUCKET_TOKEN` is needed only for `pull_request` events.** There is no branch-ancestry tag resolution here at all, so nothing needs an authenticated `git fetch` to see prior versions — the current version is just whatever `VERSION.txt` already says in the checked-out working tree. Don't set it for `manual`/`push` runs unless you also need it for something else in your pipeline.
+```yaml
+clone:
+  git:
+    image: <your plugin-git image>
+```
 
 ### How a version is decided (four cases, kept separate)
 
@@ -313,14 +324,6 @@ A hand-written `Dockerfile` with no such marker is the **escape hatch** (e.g. a 
 
 Alongside the per-location `CHANGELOG.md` git-cliff writes as usual, every bump also appends one line to `PLUGIN_BASE_PATH/CHANGELOG.md`, under a `## <location>` heading (created on first use), newest bullet first. So there's always one file that answers "which versions does this component actually have" — a component born at `v2.0.0` simply has no `v1.0.0` line under its heading, because none was ever inserted for it.
 
-**Clone settings genuinely don't matter here — more so than for `master-versions`.** There's no branch-ancestry resolution, no shallow-clone unshallowing, no PR-target-branch checkout at all: the only git operation `version-file` performs is creating and immediately deleting one local, ephemeral tag per bumped component (case 2 above), which needs nothing more than a plain local repo. `partial`, `depth`, and `tags` can be anything.
-
-```yaml
-clone:
-  git:
-    image: <your plugin-git image>
-```
-
 ### Optional
 
 | Variable | Default | Description |
@@ -340,90 +343,13 @@ clone:
 ## 6. Triggering events — manual, pull_request, and push (merge)
 
 The plugin retrieves its own message — there's no explicit input step. It looks at
-`CI_PIPELINE_EVENT` (a Woodpecker-provided variable) and picks one of three retrieval paths.
-This section walks through what actually happens on each, end to end.
+`CI_PIPELINE_EVENT` and picks one of three retrieval paths:
 
-### `manual` — you trigger a run yourself
-
-You open Woodpecker's UI (or CLI) and manually trigger a pipeline, typing the release message
-into the trigger dialog's `MESSAGE` field. The `Run release (manual)` step passes it
-straight through as `PLUGIN_MESSAGE: "${MESSAGE}"`. The message is used as-is
-(no external calls) and — because a mistyped message is the #1 cause of a confusing "nothing
-released" run — echoes it back line-numbered, between `BEGIN`/`END
-PLUGIN_MESSAGE` banners, so you can see exactly what was submitted before wondering why a line
-didn't match.
-
-**When to use it:** a hotfix on a branch that never goes through a PR, or any release that
-doesn't have a PR description to source from. There's no branch restriction on this trigger, so it
-can run against whatever branch you're on when you trigger it — and because the current version is
-read straight off `VERSION.txt` in that branch's own working tree, there's nothing extra to think
-about: a hotfix branch cut from an older commit automatically has the older `VERSION.txt` content,
-with no branch-ancestry lookup required at all.
-
-### `pull_request` — every PR open/update
-
-Fires whenever a PR is opened or updated against its target branch. The plugin fetches the PR's
-**live** description directly from the Bitbucket Server REST API — not whatever the description
-said when the PR was first opened.
-
-This run computes what *would* be released and can build candidate images — but it **never**
-writes `VERSION.txt`, pushes changelog commits, or creates tags. Doing so would rewrite the PR's
-own source branch on every push, re-triggering the `pull_request` event and re-releasing a
-brand-new component on every single build. This event exists purely to preview and validate the
-release; nothing is persisted until the merge.
-
-### `push` to the main branch (merge) — the only event that persists anything
-
-The publish pipeline also triggers on `push`, scoped tightly: `branch: main` **and**
-`evaluate: 'CI_COMMIT_MESSAGE contains "Merge pull request"'`. This is deliberately not
-`pull_request_closed` — that event also fires on PR decline and PR delete, which would silently
-persist stale changes for a PR that never actually merged.
-
-By the time this fires, there is no PR context left, so the Bitbucket-API path used by
-`pull_request` isn't available. The plugin instead reads the merge commit's own body via
-`git log -1 --pretty=%B` and takes everything after a `DESCRIPTION` marker line. **This only
-works if Bitbucket's merge commit actually contains that marker and the PR description under
-it** — which is not what Bitbucket produces by default. That's the required setting below.
-
-Once the message is retrieved, the `Run release (merge)` step computes every version, writes
-`VERSION.txt` and both changelog layers, and the final `Push changelogs to Git` step commits
-everything and pushes the release tags — the only point in either pipeline where anything is
-actually persisted back to git.
-
-### Required Bitbucket setting: squash merge with `DESCRIPTION` injected into the commit
-
-For the `push` event above to see the PR description at all, this repo's Bitbucket merge
-strategy must be configured to carry it into the commit that lands on `main`:
-
-1. In Bitbucket Server/DC → repository **Settings → Pull Requests → Merge strategies**, set the
-   merge strategy to **Squash** (keeps `main` at one commit per PR, matching this pipeline's
-   assumption that `git log -1` on the push *is* the whole merge).
-2. Customize that strategy's **commit message template** to include a `DESCRIPTION` header
-   followed by the PR description variable:
-   ```
-   Merge pull request #${id} from ${fromRefName}
-
-   METADATA
-   Title: ${title}
-   Target: ${toRepoSlug} (${toRefName})
-   Source: ${fromRepoSlug} (${fromRefName})
-
-   DESCRIPTION
-   ${description}
-   ```
-3. Set **max commit summaries to `0`**, so the squashed source-branch commit messages aren't
-   appended below `DESCRIPTION` — otherwise they get parsed too, as extra (likely garbage)
-   commit lines alongside the real PR body.
-
-**If this isn't configured:** the plugin still runs, finds no `DESCRIPTION`
-marker, logs a yellow `WARNING`, and falls back to the full merge commit body — which on
-Bitbucket's *default* template is just `Merge pull request #123 from feature-branch`, containing
-no `[location]` lines at all. The pipeline "succeeds" and silently releases nothing on every merge.
-
-The template's first line matters beyond `DESCRIPTION` extraction, too: the publish pipeline's
-`evaluate: 'CI_COMMIT_MESSAGE contains "Merge pull request"'` guard depends on it staying
-`Merge pull request #...` — changing that opening line means updating the `evaluate:` guard as
-well, or the publish pipeline will never fire on a real merge.
+| Event | What it does |
+|---|---|
+| `manual` | You type the release message directly into Woodpecker's trigger dialog. For a hotfix branch or any release without a PR to source from. |
+| `pull_request` | Fetches the PR's live description from Bitbucket. Computes candidate versions only — never writes `VERSION.txt`, pushes a changelog, or creates a tag. |
+| `push` to `main` (a PR merge) | Gated by `branch: main` **and** `evaluate: 'CI_COMMIT_MESSAGE contains "Merge pull request"'` — a direct push to `main` that isn't a PR merge never matches this and never triggers the pipeline at all. The only event that persists anything: reads `git log -1 --pretty=%B` and takes everything after the first `DESCRIPTION` marker it finds — which only a real PR merge produces, via the commit message template from §7A. If no `DESCRIPTION` marker is found, it falls back to using the full commit message as-is (and prints a yellow `WARNING`). Requires the Bitbucket setup in [§7A](#7-tutorial--set-up-bitbucket-add-the-pipeline-release-a-hotfix). |
 
 ---
 
@@ -439,9 +365,12 @@ You need **repository admin** rights. This is what makes the release description
 the pipeline after a PR is merged.
 
 1. Repo → **Repository settings** (gear icon) → **Pull Requests**.
-2. Under **Merge strategies**, restrict the repo to **Squash** only, and set it as the default.
-3. On the Squash strategy, turn on the custom commit message option and paste this template
-   exactly:
+2. Under **Merge strategies**, pick whichever strategies you want available — this isn't tied to
+   Squash specifically. `commitMessageTemplate` (step 3) is a single, repo-wide setting in
+   Bitbucket's merge config with no per-strategy variant, so it applies no matter which strategy
+   the merger picks. Restricting to Squash-only is still worth doing to keep `main` at one commit
+   per PR, but it's not required for the template or the `DESCRIPTION` extraction to work.
+3. Turn on the custom commit message option and paste this template exactly:
    ```
    Merge pull request #${id} from ${fromRefName}
 
@@ -453,11 +382,18 @@ the pipeline after a PR is merged.
    DESCRIPTION
    ${description}
    ```
-4. Under **Commit summaries**, set the maximum to `0`.
-5. Save, then verify: open a throwaway PR with a body like `feat[nati]: verify squash template`,
-   merge it, and on `main` run `git log -1 --pretty=%B`. You should see the template above with
-   your PR body under `DESCRIPTION`. If you only see `Merge pull request #123 from
-   feature-branch`, the template didn't save — repeat step 3.
+4. Under **Commit summaries**, set the maximum to `0`. **This is the setting that actually
+   matters, regardless of strategy.** The push-event message retrieval takes everything after the
+   `DESCRIPTION` marker to the end of the commit message, verbatim — if commit summaries aren't
+   disabled, Bitbucket appends the individual source-branch commits' summary lines after
+   `${description}`, and those land inside what gets parsed as the PR description, right along
+   with the real content.
+5. Save, then verify: open a throwaway PR with a body like `feat[nati]: verify template`, merge
+   it, and on `main` run `git log -1 --pretty=%B`. You should see the template above with your PR
+   body under `DESCRIPTION` and nothing appended after it. If you see extra commit summary lines
+   after your description, go back to step 4. If you see no template at all — just
+   `Merge pull request #123 in PROJECT/repo from feature-branch to main` — the merge commit
+   message option from step 3 wasn't actually saved; go back there.
 
 ### B. Add the pipeline to your repo
 
@@ -466,7 +402,15 @@ the pipeline after a PR is merged.
 | Secret | Value |
 |---|---|
 | `bitbucket_token` | A Bitbucket HTTP access token with read access to this repo — only needed if you'll use `pull_request` events |
-| `docker_username` / `docker_password` | Credentials for the registry you push built images to |
+| `artifactory_token` | Only needed if you're adding the `buildah-master-versions` step below — password/token for the registry you push built images to (`username` is a plain value, not a secret) |
+
+**When to include the `Build and push plugin images` step (`buildah-master-versions`):** only if
+your components have their own `Dockerfile` (hand-written, or generated from `Dockerfile.template`
+— see [§5](#5-variables)) and you actually want an image built and pushed for every tag
+`version-file` creates. It reads `PLUGIN_OUTPUT_TAGS_FILE` (`new_tags.txt`) and resolves each tag
+to `PLUGIN_BASE_PATH/<location>/Dockerfile`. If you only need versioning and changelogs — no image
+builds — drop this step (and the `artifactory_token` secret) from both pipelines below;
+everything else still works unchanged.
 
 **Create `.woodpecker/pr.yml`** — runs on every PR, computes candidate versions, never touches git:
 
@@ -488,18 +432,18 @@ steps:
         from_secret: bitbucket_token
       PLUGIN_CHANGELOG_LEVEL: "1"   # set to whatever depth(s) your components live at, e.g. "0,4"
 
+  # Only needed if your components have Dockerfiles you want built and pushed — see §7B above.
   - name: Build and push plugin images
     image: netanelzucaim123/buildah-master-versions:latest
     privileged: true
-    environment:
-      PLUGIN_BASE_PATH: "."
-      PLUGIN_TAGS_FILE: "new_tags.txt"
-      PLUGIN_REPO: "myorg"
-    secrets:
-      - source: docker_username
-        target: plugin_username
-      - source: docker_password
-        target: plugin_password
+    settings:
+      base_path: .
+      tags_file: new_tags.txt
+      registry: harbor.devopstashtiot.page
+      repo: plugins
+      username: admin
+      password:
+        from_secret: artifactory_token
 ```
 
 **Create `.woodpecker/publish.yml`** — the only pipeline that ever writes back to git:
@@ -535,18 +479,18 @@ steps:
       PLUGIN_OUTPUT_TAGS_FILE: "new_tags.txt"
       PLUGIN_CHANGELOG_LEVEL: "1"
 
+  # Only needed if your components have Dockerfiles you want built and pushed — see §7B above.
   - name: Build and push plugin images
     image: netanelzucaim123/buildah-master-versions:latest
     privileged: true
-    environment:
-      PLUGIN_BASE_PATH: "."
-      PLUGIN_TAGS_FILE: "new_tags.txt"
-      PLUGIN_REPO: "myorg"
-    secrets:
-      - source: docker_username
-        target: plugin_username
-      - source: docker_password
-        target: plugin_password
+    settings:
+      base_path: .
+      tags_file: new_tags.txt
+      registry: harbor.devopstashtiot.page
+      repo: plugins
+      username: admin
+      password:
+        from_secret: artifactory_token
 
   - name: Push changelogs to Git
     image: alpine/git
@@ -572,11 +516,11 @@ steps:
 Note `PLUGIN_BITBUCKET_TOKEN` isn't set on either `publish.yml` step above — neither `manual` nor
 `push` needs it, since there's no tag/branch resolution to authenticate for (see [§5](#5-variables)).
 
-Swap `PLUGIN_CHANGELOG_LEVEL`, `PLUGIN_REPO`, and the image names for your own values, then
+Swap `PLUGIN_CHANGELOG_LEVEL`, `PLUGIN_REPO`, and the two image names for your own values, then
 test: open a throwaway PR (`pr.yml` should compute versions, touching no git state), then merge it
 (`publish.yml` should push `VERSION.txt`/changelog commits and a tag to `main`). If the merge run
-produces nothing, re-check part A first — a missing/incorrect squash template is the most common
-cause.
+produces nothing, re-check part A first — a missing/incorrect commit message template, or commit
+summaries left enabled, is the most common cause.
 
 ### C. Release a hotfix
 
@@ -618,16 +562,32 @@ that's actually checked out. So the only thing that matters is cutting the branc
 
 ## 8. Cross-referencing with changed-files
 
-`PLUGIN_OUTPUT_LOCATIONS_FILE` writes every accepted location as a sorted, newline-separated list, after wildcard expansion. Because it captures all qualifying locations — including those whose commit type is `skip=true` in `cliff.toml` (e.g. `other`, `code_description`) — it acts as a full scope manifest of everything the PR author claimed to touch, regardless of whether a release was produced.
+**Use this when you want to verify that a PR's `[location]` declarations actually match the files
+it changed** — catching a PR whose description says `feat[nati]: ...` but never touched `nati/`,
+or one that touched `plugins/docker/` without declaring it anywhere. This compares what the PR
+*claims* against what actually changed on disk, so it's PR-time validation — it's an addition to
+`pr.yml` (§7B), not something `publish.yml` needs.
+
+`PLUGIN_OUTPUT_LOCATIONS_FILE` writes every accepted location as a sorted, newline-separated list. Because it captures all qualifying locations — including those whose commit type is `skip=true` in `cliff.toml` (e.g. `other`, `code_description`) — it acts as a full scope manifest of everything the PR author claimed to touch, regardless of whether a release was produced.
 
 The [`changed-files`](../changed-files/) plugin writes the set of directories that actually changed in the push. The [`master-versions-vs-changed-files`](../master-versions-vs-changed-files/) plugin then compares the two and reports mismatches:
 
 - **Changed but not declared** — a directory changed on disk but no `[location]` in the PR body covers it
 - **Declared but not changed** — a `[location]` appears in the PR body but no files under it actually changed
 
-> No "fetch PR body" step is needed — `version-file` retrieves its own message (see [§6 Triggering events](#6-triggering-events--manual-pull_request-and-push-merge)), so it only needs the usual `PLUGIN_BITBUCKET_TOKEN`/`PLUGIN_MESSAGE` depending on the triggering event.
+This is `pr.yml` from [§7B](#7-tutorial--set-up-bitbucket-add-the-pipeline-release-a-hotfix), with
+two steps added: `Get changed dirs` runs first, and `Check scopes vs changes` runs right after
+`Run release` (which gains `PLUGIN_OUTPUT_LOCATIONS_FILE`). Everything else — including whether
+you keep the `Build and push plugin images` step — is unchanged from §7B:
 
 ```yaml
+clone:
+  git:
+    image: woodpeckerci/plugin-git:latest
+
+when:
+  - event: pull_request
+
 steps:
   - name: Get changed dirs
     image: netanelzucaim123/changed-files:latest
@@ -640,11 +600,11 @@ steps:
     image: netanelzucaim123/version-file:latest
     environment:
       PLUGIN_BASE_PATH: "."
-      PLUGIN_CHANGELOG_LEVEL: "1"
       PLUGIN_OUTPUT_TAGS_FILE: "new_tags.txt"
       PLUGIN_OUTPUT_LOCATIONS_FILE: "release_locations.txt"
       PLUGIN_BITBUCKET_TOKEN:
         from_secret: bitbucket_token
+      PLUGIN_CHANGELOG_LEVEL: "1"   # set to whatever depth(s) your components live at, e.g. "0,4"
 
   - name: Check scopes vs changes
     image: netanelzucaim123/master-versions-vs-changed-files:latest
@@ -652,105 +612,29 @@ steps:
       master_versions_locations_file: release_locations.txt
       changed_dirs_file: changed_dirs.txt
       fail_on_mismatch: false
-```
 
-> Set `fail_on_mismatch: true` to fail the pipeline when the PR description and the actual changed directories do not match exactly.
-
----
-
-## 9. Pipeline — standalone
-
-Use `version-file` on its own when you only need versioning and changelogs — no Docker image builds involved.
-
-> No "fetch PR body" step is needed — `version-file` retrieves its own message (see [§6 Triggering events](#6-triggering-events--manual-pull_request-and-push-merge)): the Bitbucket API for `pull_request` events, `PLUGIN_MESSAGE` for `manual` runs, or the merge commit for a `push`. Clone settings don't matter at all — see [§5](#5-variables).
-
-```yaml
-steps:
-  - name: Run release
-    image: netanelzucaim123/version-file:latest
-    environment:
-      PLUGIN_BASE_PATH: "."
-      PLUGIN_CHANGELOG_LEVEL: "1"
-      PLUGIN_OUTPUT_TAGS_FILE: "new_tags.txt"
-      PLUGIN_BITBUCKET_TOKEN:
-        from_secret: bitbucket_token
-
-  - name: Push changelogs and tags
-    image: alpine/git
-    commands:
-      - git config user.email "ci@example.com"
-      - git config user.name "CI"
-      - find . \( -name "CHANGELOG.md" -o -name "VERSION.txt" \) -not -path "./.git/*" | xargs -r git add
-      - |
-        if ! git diff --cached --quiet; then
-          git commit -m "chore: update changelogs [skip ci]"
-          git push --force-with-lease origin "HEAD:$${CI_COMMIT_BRANCH}"
-        fi
-        for tag in $(cat new_tags.txt); do git tag -f "$tag"; done
-        git push --force --tags origin
-```
-
-> `--force-with-lease` on the branch push (not plain `--force`): it only overwrites if the remote branch still matches what this workspace last saw, so a concurrent push to the same branch is rejected instead of silently discarded. `$${CI_COMMIT_BRANCH}` uses Woodpecker's `$$` escape so the literal `${CI_COMMIT_BRANCH}` reaches the shell instead of being substituted away by Woodpecker first — see the root `CLAUDE.md`'s Bitbucket push-access gotcha for the same escaping rule.
-
----
-
-## 10. Pipeline — with buildah-master-versions (optional)
-
-> **Only add this step if your repository contains Dockerfiles you want to build and push.**
-> If you only do versioning and changelogs, the previous section is all you need.
-
-When each component has a `Dockerfile` (hand-written, or generated from `Dockerfile.template` — see [§5](#5-variables)), `buildah-master-versions` reads the tags file produced by `version-file` and builds + pushes the corresponding Docker image for each tag.
-
-```
-version-file                            buildah-master-versions
-──────────────────────────────          ──────────────────────────────────────────
-parse retrieved message                 reads new_tags.txt line by line
-  → nati-1.1.0                     ──►  nati-1.1.0       → PLUGIN_BASE_PATH/nati/Dockerfile
-  → plugins-docker-2.0.0           ──►  plugins-docker-2.0.0 → PLUGIN_BASE_PATH/plugins/docker/Dockerfile
-appended to new_tags.txt                builds and pushes each image via buildah
-```
-
-```yaml
-steps:
-  - name: Run release
-    image: netanelzucaim123/version-file:latest
-    environment:
-      PLUGIN_BASE_PATH: "."
-      PLUGIN_CHANGELOG_LEVEL: "1"
-      PLUGIN_OUTPUT_TAGS_FILE: "new_tags.txt"
-      PLUGIN_BITBUCKET_TOKEN:
-        from_secret: bitbucket_token
-
-  - name: Push changelogs and tags
-    image: alpine/git
-    commands:
-      - git config user.email "ci@example.com"
-      - git config user.name "CI"
-      - find . \( -name "CHANGELOG.md" -o -name "VERSION.txt" \) -not -path "./.git/*" | xargs -r git add
-      - |
-        if ! git diff --cached --quiet; then
-          git commit -m "chore: update changelogs [skip ci]"
-          git push --force-with-lease origin "HEAD:$${CI_COMMIT_BRANCH}"
-        fi
-        for tag in $(cat new_tags.txt); do git tag -f "$tag"; done
-        git push --force --tags origin
-
-  - name: Build and push images
+  # Only needed if your components have Dockerfiles you want built and pushed — see §7B.
+  - name: Build and push plugin images
     image: netanelzucaim123/buildah-master-versions:latest
+    privileged: true
     settings:
       base_path: .
       tags_file: new_tags.txt
-      repo: myorg
-    secrets:
-      - source: docker_username
-        target: plugin_username
-      - source: docker_password
-        target: plugin_password
+      registry: harbor.devopstashtiot.page
+      repo: plugins
+      username: admin
+      password:
+        from_secret: artifactory_token
 ```
+
+> Set `fail_on_mismatch: true` to fail the PR build when the description and the actual changed
+> directories don't match exactly, instead of just reporting the mismatch. `publish.yml` is
+> unaffected by any of this — its `Push changelogs to Git` step still runs exactly as shown in
+> §7B.
 
 ---
 
-## 11. Examples
+## 9. Examples
 
 ### Single component — minor bump
 
@@ -800,7 +684,7 @@ Both produce a major bump (for a non-CA-managed component — a CA-managed one i
 
 ### CA-managed rotation — root and every hardened image together
 
-Given `images.txt` lists `dockerhub/woodpeckerci/plugin-git/2.9.3` and root is currently at `v2.0.0`:
+Given `images.txt` lists `dockerhub/woodpeckerci/plugin-git/2.9.3` and both root and the image are currently at `v2.0.0`:
 
 ```
 feat[]: rotate CA

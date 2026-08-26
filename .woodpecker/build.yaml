@@ -4,6 +4,15 @@
 when:
   - event: [push, pull_request, manual]
 
+# Custom clone image, trusting the internal Cloudflare Origin CA — the default
+# woodpeckerci/plugin-git image doesn't trust it, so cloning bitbucket.devopstashtiot.page
+# would otherwise fail the same way a plain `git clone` does anywhere else in this
+# platform (x509: certificate signed by unknown authority). Same CA-trust story as every
+# other in-cluster caller (see base/git-cert, plugins/plugin-git-cert in a-woodpecker-plugins).
+clone:
+  git:
+    image: harbor.devopstashtiot.page/plugins/plugin-git-cert:prod
+
 steps:
   # version-file runs as a real published plugin image now — plugins/version-file is
   # one of this repo's own 15 components (built by build-and-push, below, same as

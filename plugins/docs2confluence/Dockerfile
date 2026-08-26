@@ -4,10 +4,9 @@ ENV PANDOC_URL=https://github.com/jgm/pandoc/releases/download/3.8/pandoc-3.8-li
 
 WORKDIR /app
 
-# Trust the Cloudflare Origin CA so this plugin's calls to *.devopstashtiot.page
-# (the Confluence API it pushes docs to) verify TLS.
-COPY cloudflare-origin-ca-rsa-root.pem /etc/pki/ca-trust/source/anchors/cloudflare-origin-ca-rsa-root.pem
-RUN update-ca-trust
+COPY cloudflare-origin-ca-rsa-root.pem /tmp/cloudflare-origin-ca-rsa-root.pem
+COPY inject-ca.sh /tmp/inject-ca.sh
+RUN sh /tmp/inject-ca.sh && rm -f /tmp/inject-ca.sh /tmp/cloudflare-origin-ca-rsa-root.pem
 
 RUN dnf -y install wget jq bash && \
     dnf clean all && \

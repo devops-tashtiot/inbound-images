@@ -45,10 +45,56 @@ One question decides it — everything else follows from the answer.
 ## Every image here trusts the CA — no exceptions
 
 Unlike `outbound-images-with-ca`, nothing generates these Dockerfiles — each one is
-hand-written, so CA injection has to be added by hand too, and it's easy to forget on a
-component built from an unusual base. **This is enforced in CI, not just documented** —
-`check-ca` runs `scripts/check-ca-injection.sh` right after `version`, and **fails the
-build** if any component:
+hand-written. But you never have to figure out *how* your particular base image trusts
+a CA — no investigating whether it's Debian, RHEL, Alpine, or something with no trust
+store at all. Every Dockerfile in this repo uses the **same three lines**, copied
+verbatim, regardless of base image:
+
+```dockerfile
+FROM <image>
+
+COPY cloudflare-origin-ca-rsa-root.pem /tmp/cloudflare-origin-ca-rsa-root.pem
+COPY inject-ca.sh /tmp/inject-ca.sh
+RUN sh /tmp/inject-ca.sh && rm -f /tmp/inject-ca.sh /tmp/cloudflare-origin-ca-rsa-root.pem
+
+# ...whatever your component actually needs, after this
+```
+
+`scripts/inject-ca.sh` (a local copy lives alongside every component's own `Dockerfile`
+— see "Layout" below) auto-detects which of four mechanisms your base image actually
+needs and does it: `update-ca-trust` (RHEL/UBI, including `ubi9-minimal`, which has it
+despite the name), `update-ca-certificates` (Debian/Ubuntu), append-to-bundle (Alpine —
+no `update-ca-certificates` package present, no network needed), or a plain file `COPY`
+into `SSL_CERT_DIR` for an image with no OS trust-store tooling at all (the two
+`gcr.io/kaniko-project/executor` plugins have no `update-ca-*` binary, no
+`/etc/os-release` — Go's `crypto/x509` reads `SSL_CERT_DIR` directly, so dropping the
+file in is the entire fix). Verified against every distinct base-image family actually
+in use here, real builds, real CA-landed checks each time — including the SSL_CERT_DIR
+case, which is new: the two kaniko plugins previously `COPY`d straight into
+`/kaniko/ssl/certs/` themselves, hand-picking that mechanism; now they use the exact
+same three lines as everything else, and the generic script picks it for them.
+
+**This is enforced in CI, not just documented** — `check-ca` runs
+`scripts/check-ca-injection.sh` right after `version`, and **fails the build** if any
+component targeted this run:
+
+- has no real `COPY` of the cert, no real `COPY` of `inject-ca.sh`, or `COPY`s the
+  injector but never `RUN`s it. Checked against actual instruction lines with comments
+  stripped first — a Dockerfile that only *mentions* either file in a comment doesn't
+  count (verified: constructed exactly that case, confirmed it fails).
+- *does* have all three lines, but from a local `cloudflare-origin-ca-rsa-root.pem`
+  and/or `inject-ca.sh` copy that's gone stale — no longer byte-matches the real ones
+  at `certs/cloudflare-origin-ca-rsa-root.pem` / `scripts/inject-ca.sh`. This is the
+  failure mode that actually matters for a rollout, or for a fix/new distro case added
+  to the canonical injector: `[**]` bumping a component's version number doesn't help
+  if the Dockerfile it rebuilds from is still using last year's cert or last month's
+  injector logic.
+
+**No exemption mechanism exists** — a speculative "this one doesn't need it" escape
+hatch was considered and dropped: nothing in this repo has ever actually needed one,
+and an unused exemption is a silent, unreviewed way for a real gap to slip through
+later. If a genuine no-CA-possible case ever shows up, add the check for it then,
+against the real constraint.
 
 **Scoped to what this run actually targeted, not every component in the repo.**
 `check-ca` reads `new_locations.txt` — the file `version` (running just before it)
@@ -70,42 +116,18 @@ pipeline on a failed step, so a bad CA still blocks the actual build/push even t
 `version` already ran; `version`'s local `VERSION.txt`/`CHANGELOG.md` writes just
 never get committed, since `commit-back` (the last step) never runs either.
 
-- has no CA injection at all. **This is a real check, not a loose grep** — it strips
-  comments first, then requires one of a fixed set of genuine patterns to appear on an
-  actual `RUN`/`COPY` instruction: `update-ca-trust`, `update-ca-certificates`, a
-  `COPY` into a known OS trust-store path, or a `RUN` appending into the known Alpine
-  bundle. A Dockerfile that only *mentions* the cert — in a comment, or `COPY`d
-  somewhere inert like `/tmp/` — now fails instead of incidentally passing (verified:
-  both of those exact cases were constructed and confirmed to fail). **No exemption
-  mechanism exists** — a speculative "this one doesn't need it" escape hatch was
-  considered and dropped: nothing in this repo has ever actually needed one (not even
-  the two `kaniko-*` plugins, which have no OS trust store at all — no `update-ca-*`
-  binary, no `/etc/os-release` — and still inject the CA correctly, see below), and an
-  unused exemption is a silent, unreviewed way for a real gap to slip through later. If
-  a genuine no-CA-possible case ever shows up, add the check for it then, against the
-  real constraint.
-- *does* inject a CA, but from a local copy that's gone stale — i.e. its own
-  `<component>/cloudflare-origin-ca-rsa-root.pem` no longer byte-matches the real
-  `certs/cloudflare-origin-ca-rsa-root.pem`. This is the failure mode that actually
-  matters for a rollout: `[**]` bumping a component's version number doesn't help if
-  the Dockerfile it rebuilds from is still `COPY`ing last year's cert.
+All 15 components currently pass.
 
-All 15 components currently pass. The exact injection technique differs by base image
-(this repo currently has three): `update-ca-trust` for the RHEL/UBI family (including
-`ubi9-minimal`, which has it despite the name), append-to-bundle for Alpine (no
-`update-ca-certificates` package present, and no network needed), and for the two
-`gcr.io/kaniko-project/executor` plugins — a plain `COPY` into `/kaniko/ssl/certs/` (the
-directory `SSL_CERT_DIR` already points at; Go's `crypto/x509` reads every file in it
-directly, no "update" step exists or is needed).
+### If the cert file (or the injector script) is ever renamed
 
-### If the cert file is ever renamed
-
-`scripts/check-ca-injection.sh` reads the filename from `PLUGIN_CA_CERT_FILENAME`
-(set in `.woodpecker/build.yaml`'s `check-ca` step, default
-`cloudflare-origin-ca-rsa-root.pem`) — that one variable is the only place *this
-script* needs to change on a rename; verified live (pointed it at a name that doesn't
-exist, confirmed the check correctly fails with a clear "does not exist" message
-instead of silently passing against the old file).
+`scripts/check-ca-injection.sh` reads both filenames from environment variables —
+`PLUGIN_CA_CERT_FILENAME` (default `cloudflare-origin-ca-rsa-root.pem`) and
+`PLUGIN_CA_INJECTOR_FILENAME` (default `inject-ca.sh`), both set in
+`.woodpecker/build.yaml`'s `check-ca` step. Those two variables are the only place
+*this script* needs to change on either rename; verified live for the cert filename
+(pointed it at a name that doesn't exist, confirmed the check correctly fails with a
+clear "does not exist" message instead of silently passing against the old file) —
+the injector filename check works identically, same code path.
 
 Two things still need editing by hand regardless, and can't be made one-place — not
 an oversight, a real Woodpecker/Dockerfile constraint:
@@ -193,9 +215,10 @@ inbound-images/
 ├── certs/cloudflare-origin-ca-rsa-root.pem   # the canonical cert every component's own copy must match
 ├── scripts/
 │   ├── version-file/                 # vendored orchestrator (release.py, cliff.toml, tests)
+│   ├── inject-ca.sh                  # the canonical generic injector every component's own copy must match
 │   └── check-ca-injection.sh         # CI gate: every Dockerfile injects the CA, no stale copies
-├── base/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, VERSION.txt, CHANGELOG.md}
-├── plugins/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, VERSION.txt, CHANGELOG.md, ...}
+├── base/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, inject-ca.sh, VERSION.txt, CHANGELOG.md}
+├── plugins/<name>/{Dockerfile, cloudflare-origin-ca-rsa-root.pem, inject-ca.sh, VERSION.txt, CHANGELOG.md, ...}
 └── .woodpecker/build.yaml
 ```
 

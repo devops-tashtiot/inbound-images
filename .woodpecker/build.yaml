@@ -44,11 +44,12 @@ steps:
     image: alpine:3
     environment:
       PLUGIN_LOCATIONS_FILE: new_locations.txt
-      # The one place this filename is configured for check-ca-injection.sh's own
-      # use — rename the real cert file and only this line needs to change here.
-      # Each component's Dockerfile still needs its own COPY line updated by hand
-      # either way (unavoidable — it's not this script's file to edit).
+      # The one place these filenames are configured for check-ca-injection.sh's own
+      # use — rename either real file and only the matching line here needs to
+      # change. Each component's Dockerfile still needs its own COPY lines updated
+      # by hand either way (unavoidable — it's not this script's file to edit).
       PLUGIN_CA_CERT_FILENAME: cloudflare-origin-ca-rsa-root.pem
+      PLUGIN_CA_INJECTOR_FILENAME: inject-ca.sh
     commands:
       - sh scripts/check-ca-injection.sh
 

@@ -12,10 +12,9 @@ FROM harbor.devopstashtiot.page/base/ubi9:v1.0.0
 ENV CERT_PATH=/etc/pki/ca-trust/source/anchors/ \
     SONAR_CLI=https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-7.1.0.4889-linux-x64.zip
 
-# Trust the Cloudflare Origin CA explicitly rather than relying on the (stale-pinned)
-# base image to already have it — matches every other component in this repo.
-COPY cloudflare-origin-ca-rsa-root.pem /etc/pki/ca-trust/source/anchors/cloudflare-origin-ca-rsa-root.pem
-RUN update-ca-trust
+COPY cloudflare-origin-ca-rsa-root.pem /tmp/cloudflare-origin-ca-rsa-root.pem
+COPY inject-ca.sh /tmp/inject-ca.sh
+RUN sh /tmp/inject-ca.sh && rm -f /tmp/inject-ca.sh /tmp/cloudflare-origin-ca-rsa-root.pem
 
 COPY sonar-scan.sh /sonar-scan.sh
 

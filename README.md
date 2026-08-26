@@ -47,8 +47,28 @@ One question decides it — everything else follows from the answer.
 Unlike `outbound-images-with-ca`, nothing generates these Dockerfiles — each one is
 hand-written, so CA injection has to be added by hand too, and it's easy to forget on a
 component built from an unusual base. **This is enforced in CI, not just documented** —
-`.woodpecker/build.yaml`'s `check-ca` step runs `scripts/check-ca-injection.sh` before
-anything else, and **fails the build** if any component:
+`check-ca` runs `scripts/check-ca-injection.sh` right after `version`, and **fails the
+build** if any component:
+
+**Scoped to what this run actually targeted, not every component in the repo.**
+`check-ca` reads `new_locations.txt` — the file `version` (running just before it)
+already writes via `PLUGIN_OUTPUT_LOCATIONS_FILE`, listing exactly which component(s)
+the message resolved to. That's real, already-implemented location-resolution logic
+(the same wildcard/indicator-file rules from "How `[**]` finds components" above) —
+`check-ca` doesn't reimplement any of it, just reads the result. So
+`fix[plugins/master-versions]: ...` checks only `plugins/master-versions`; a
+`breaking[**]: ...` rotation resolves to every component, so it still checks all of
+them, same as before. Verified: a targeted single-location commit produces a
+one-line `new_locations.txt` and a scoped, single-component check run; a `[**]`
+commit produces all 15 lines and checks all 15; a run with nothing releasable leaves
+`new_locations.txt` empty and the check passes immediately with nothing to do. A PR
+touching one component is judged on that component's own CA state — not blocked by
+an unrelated, pre-existing problem elsewhere in the repo it doesn't even target.
+
+`check-ca` runs after `version` but before `build-and-push` — Woodpecker stops the
+pipeline on a failed step, so a bad CA still blocks the actual build/push even though
+`version` already ran; `version`'s local `VERSION.txt`/`CHANGELOG.md` writes just
+never get committed, since `commit-back` (the last step) never runs either.
 
 - has no CA injection at all. **This is a real check, not a loose grep** — it strips
   comments first, then requires one of a fixed set of genuine patterns to appear on an

@@ -5,22 +5,15 @@ when:
   - event: [push, pull_request, manual]
 
 steps:
-  # ── Every Dockerfile must inject the CA, using a copy that's actually in sync ────
-  # Blocking, unlike outbound-images-with-ca's escape-hatch guards (which were dropped
-  # in favor of PR review) — every Dockerfile here is hand-written, none of them are
-  # auto-generated-and-therefore-trusted-by-construction, so nothing else catches a
-  # missing or stale CA block.
-  - name: check-ca
-    image: alpine:3
-    commands:
-      - sh scripts/check-ca-injection.sh
-
   # version-file lives directly in this repo (scripts/version-file/) rather than as a
   # published plugin image — same "vendored, not pulled" pattern outbound-images-with-ca uses for
   # fan_out.py. PLUGIN_COMPONENT_INDICATOR_FILE=Dockerfile (not the default VERSION.txt)
   # so [**] discovers a component the moment its Dockerfile exists — a mass CA rotation
   # (breaking[**]: ...) reaches a component on its true first release too, not just on
   # every release after the first. See README "How [**] finds components".
+  # PLUGIN_OUTPUT_LOCATIONS_FILE records exactly which component(s) this run actually
+  # resolved to (already-implemented, not new) — check-ca (next) scopes itself to just
+  # those, instead of re-checking every component in the repo on every push.
   - name: version
     image: harbor.devopstashtiot.page/inbound_images/base/uv-python-311:latest
     environment:
@@ -28,11 +21,31 @@ steps:
       PLUGIN_CHANGELOG_LEVEL: "2"
       PLUGIN_CLIFF_TOML: cliff.toml
       PLUGIN_OUTPUT_TAGS_FILE: new_tags.txt
+      PLUGIN_OUTPUT_LOCATIONS_FILE: new_locations.txt
       PLUGIN_COMPONENT_INDICATOR_FILE: Dockerfile
       PLUGIN_BITBUCKET_TOKEN:
         from_secret: bitbucket_token
     commands:
       - python3 scripts/version-file/release.py
+
+  # ── Only the Dockerfile(s) THIS run actually targeted must inject the CA ─────────
+  # Blocking, unlike outbound-images-with-ca's escape-hatch guards (which were dropped
+  # in favor of PR review) — every Dockerfile here is hand-written, none of them are
+  # auto-generated-and-therefore-trusted-by-construction, so nothing else catches a
+  # missing or stale CA block. Scoped via new_locations.txt (written by `version`
+  # above, already real component-resolution logic — not reimplemented here): a PR
+  # naming one component (feat[plugins/master-versions]: ...) only checks that one; a
+  # mass rotation (breaking[**]: ...) resolves to all of them, so it still checks
+  # everything, same as before. Runs AFTER `version` so it can read that file, but
+  # BEFORE build-and-push — Woodpecker stops the pipeline on failure, so a bad CA
+  # still blocks the actual build/push; version-file's local writes just never get
+  # committed back, since commit-back never runs either.
+  - name: check-ca
+    image: alpine:3
+    environment:
+      PLUGIN_LOCATIONS_FILE: new_locations.txt
+    commands:
+      - sh scripts/check-ca-injection.sh
 
   - name: build-and-push
     image: harbor.devopstashtiot.page/inbound_images/plugins/buildah-master-versions:latest

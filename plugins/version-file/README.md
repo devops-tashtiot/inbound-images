@@ -8,13 +8,6 @@ Woodpecker CI plugin that parses a PR description, calculates semantic versions 
 |---|---|---|
 | Current-version source | A git tag (`<slug>-v1.2.3`), resolved via `git describe` against branch ancestry | A plain `<location>/VERSION.txt` file in the working tree |
 | Tag accumulation in a monorepo with many components | Every release creates a **permanent** git tag, and the tag *is* the version record — it can never be dropped. Dozens of components each releasing independently over months/years accumulates thousands of tags, cluttering `git tag -l`, `git fetch --tags`, and any tag-browsing tooling | Tags are **not** the source of truth — `VERSION.txt` is. A pipeline can still push one tag per release (useful for `buildah-master-versions`'s tag-driven build step), but nothing about version resolution depends on it existing, so a repo that doesn't need a tag-per-release history can simply not push them and rely on `VERSION.txt`/`CHANGELOG.md` diffs as the record instead — no accumulation at all |
-| Needs `PLUGIN_BITBUCKET_TOKEN` on every event? | Yes — authenticates the branch fetch used for tag resolution | No — only for `pull_request`'s PR-description fetch |
-| Clone settings (`partial`/`depth`/`tags`) | Self-heals a shallow/partial clone automatically, but still needs real ancestry | Genuinely irrelevant — no ancestry is ever read |
-| Hotfix on an old release | Cut the branch from the release's **tag** (`git checkout -b ... <tag>`) | Cut the branch from the **commit** where `VERSION.txt` held that value — no tag lookup needed |
-| Multiple images sharing one version, all moving together (e.g. a CA cert rotation) | Not supported — every component's version is independent | `images.txt` + `[**]`: root's `VERSION.txt` **is** the shared version; every declared image force-bumps in lockstep |
-| Scaffolding a new component | Create the directory yourself | List it in `images.txt` — the plugin creates the folder + empty `VERSION.txt` for you |
-| Generating a component's `Dockerfile` | Not supported — write it yourself | `Dockerfile.template` + `{{FROM_IMAGE}}` substitution, regenerated automatically unless hand-edited |
-| A location whose own path looks like a version (`0.11.29`, `2.9.3`) | ⚠️ known, currently-unfixed limitation — `feat`/`breaking` silently bump as patch instead (see `master-versions`'s `BUGS_AND_FIXES.md` §5) | Fixed — the git-cliff-facing name is sanitized (dots → underscores) so this never happens |
 
 **Use `master-versions`** for an ordinary "builtin" repo where every component is independently versioned and released through its own commit history.
 

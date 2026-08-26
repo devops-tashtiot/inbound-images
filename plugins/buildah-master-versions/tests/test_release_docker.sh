@@ -54,7 +54,7 @@ assert_eq() {
 
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if printf '%s' "${haystack}" | grep -qF "${needle}"; then
+    if printf '%s' "${haystack}" | grep -qF -- "${needle}"; then
         ok "${name}"
     else
         fail "${name}" "expected to find: '${needle}'"
@@ -63,7 +63,7 @@ assert_contains() {
 
 assert_not_contains() {
     local name="$1" haystack="$2" needle="$3"
-    if ! printf '%s' "${haystack}" | grep -qF "${needle}"; then
+    if ! printf '%s' "${haystack}" | grep -qF -- "${needle}"; then
         ok "${name}"
     else
         fail "${name}" "expected NOT to find: '${needle}'"
@@ -83,6 +83,11 @@ assert_not_contains() {
 # ─────────────────────────────────────────────────────────────────────────────
 # shellcheck disable=SC1090
 source <(sed '1d;/^main$/d' "${PLUGIN_SH}")
+
+# Saved BEFORE the build_image mock below overwrites it — SECTION 9 needs the real
+# build_image (the one that actually constructs the `buildah bud` command line), not
+# the BUILD_LOG stub every other section uses.
+REAL_BUILD_IMAGE="$(declare -f build_image)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Temp workspace — created entirely from scratch, no repo files used.
@@ -518,6 +523,60 @@ if ( export PLUGIN_BASE_PATH="."; export PLUGIN_USERNAME="u"; export PLUGIN_PASS
 else
     fail "8.4 all required vars set: expected exit 0" "exited non-zero"
 fi
+
+echo ""
+
+
+# =============================================================================
+# SECTION 9: build_image — PLUGIN_EXTRA_BUILD_CONTEXTS → --build-context flags
+#
+# Uses REAL_BUILD_IMAGE (the actual build_image, saved before SECTION 1's BUILD_LOG
+# mock overwrote it) inside an isolated subshell with buildah itself stubbed out —
+# this inspects the real `buildah bud` command line build_image constructs, without
+# needing real buildah/Docker. Correctness of the flags against a real buildah
+# binary was verified manually (see the plugin's README / PR description); this
+# only guards the shell logic that builds the flag string.
+# =============================================================================
+echo "┌────────────────────────────────────────────"
+echo "│ SECTION 9: build_image extra-context flags"
+echo "└────────────────────────────────────────────"
+
+_probe_build_image() {
+    # $1 = PLUGIN_BASE_PATH  $2 = rel_path  $3 = PLUGIN_EXTRA_BUILD_CONTEXTS
+    (
+        eval "${REAL_BUILD_IMAGE}"
+        buildah() { printf 'BUD_ARGS:%s\n' "$*"; }
+        PLUGIN_BASE_PATH="${1}"
+        PLUGIN_REGISTRY="registry.example"
+        PLUGIN_REPO="repo"
+        PLUGIN_DRY_RUN="true"
+        PLUGIN_EXTRA_BUILD_CONTEXTS="${3}"
+        build_image "${2}" "1.0.0"
+    )
+}
+
+# 9.1 — unset: no --build-context flags at all (backward compatible — every
+# existing pipeline that doesn't set this var must build exactly as before).
+out="$(_probe_build_image "." "plugins/foo" "")"
+assert_not_contains "9.1 unset PLUGIN_EXTRA_BUILD_CONTEXTS: no --build-context" "${out}" "--build-context"
+
+# 9.2 — single pair, PLUGIN_BASE_PATH=".".
+out="$(_probe_build_image "." "plugins/foo" "cacerts=certs")"
+assert_contains "9.2 single pair: flag present" "${out}" "--build-context cacerts=certs"
+
+# 9.3 — two pairs, comma-separated.
+out="$(_probe_build_image "." "plugins/foo" "cacerts=certs,cascripts=scripts")"
+assert_contains "9.3 two pairs: cacerts flag present" "${out}" "--build-context cacerts=certs"
+assert_contains "9.3 two pairs: cascripts flag present" "${out}" "--build-context cascripts=scripts"
+
+# 9.4 — non-"." PLUGIN_BASE_PATH: the shared path is prefixed with base, same
+# convention rel_path resolution already uses.
+out="$(_probe_build_image "some/base" "plugins/foo" "cacerts=certs")"
+assert_contains "9.4 non-dot base: path prefixed with base" "${out}" "--build-context cacerts=some/base/certs"
+
+# 9.5 — malformed entry (no "="): skipped, not passed to buildah as a flag.
+out="$(_probe_build_image "." "plugins/foo" "not-a-pair")"
+assert_not_contains "9.5 malformed entry: not passed as a flag" "${out}" "--build-context not-a-pair"
 
 echo ""
 

@@ -97,6 +97,35 @@ netanel-1.8           slug=netanel          version=1.8
 | `PLUGIN_LOG_LEVEL` | `info` | **buildah log verbosity.** Passed directly as `--log-level` to `buildah bud`. Available values: `panic`, `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 | `PLUGIN_SKIP_TLS_VERIFY` | `false` | Set to `"true"` to use `--tls-verify=false` on push/login |
 | `PLUGIN_INSECURE` | `false` | Set to `"true"` to use `--tls-verify=false` on push/login |
+| `PLUGIN_EXTRA_BUILD_CONTEXTS` | *(not set)* | Comma-separated `name=path` pairs (`path` relative to `PLUGIN_BASE_PATH`, same convention as a component's own `rel_path`). Passed to `buildah bud` as additional named `--build-context` entries, so a Dockerfile can `COPY --from=<name> <file> <dest>` from a folder outside its own component directory — most commonly a repo-root folder shared by every component (a CA cert, an injector script) — without needing a copy of that file duplicated into each component's own folder. |
+
+### PLUGIN_EXTRA_BUILD_CONTEXTS example
+
+Each component's real build context is still just its own folder — `buildah-master-versions`
+always builds `PLUGIN_BASE_PATH/<component>` as the context, never the repo root (see "Tag → path
+resolution" above) — so a plain `COPY certs/foo.pem ...` from a component's Dockerfile can never
+reach a repo-root `certs/` folder; Docker/buildah refuse to `COPY` anything from outside the build
+context. `PLUGIN_EXTRA_BUILD_CONTEXTS` adds one or more *named* contexts alongside the real one, so
+`COPY --from=<name>` can reach them instead:
+
+```yaml
+environment:
+  PLUGIN_BASE_PATH: .
+  PLUGIN_EXTRA_BUILD_CONTEXTS: "cacerts=certs,cascripts=scripts"
+```
+
+```dockerfile
+# plugins/foo/Dockerfile — context is plugins/foo/, but --from=cacerts/--from=cascripts
+# reach the repo-root certs/ and scripts/ folders declared above.
+FROM some/base:image
+COPY --from=cacerts cloudflare-origin-ca-rsa-root.pem /tmp/cloudflare-origin-ca-rsa-root.pem
+COPY --from=cascripts inject-ca.sh /tmp/inject-ca.sh
+RUN sh /tmp/inject-ca.sh && rm -f /tmp/inject-ca.sh /tmp/cloudflare-origin-ca-rsa-root.pem
+```
+
+No file needs to live inside `plugins/foo/` for this to work — `certs/` and `scripts/` stay in one
+place at the repo root, shared by every component's Dockerfile. Verified against a real `buildah
+bud` (not just the shell logic) with the exact `quay.io/buildah/stable` image this plugin runs.
 
 ### PLUGIN_ALIASES examples
 

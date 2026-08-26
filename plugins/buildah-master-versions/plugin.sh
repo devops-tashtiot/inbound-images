@@ -36,6 +36,14 @@ set -euo pipefail
 #                            Available values: panic, fatal, error, warn, info, debug, trace
 #   PLUGIN_SKIP_TLS_VERIFY — "true" → --tls-verify=false
 #   PLUGIN_INSECURE        — "true" → --tls-verify=false
+#   PLUGIN_EXTRA_BUILD_CONTEXTS — comma-separated name=path pairs (path relative to
+#                            PLUGIN_BASE_PATH). Passed to `buildah bud` as additional
+#                            named --build-context entries, so a Dockerfile can
+#                            `COPY --from=<name> <file> <dest>` from a folder outside
+#                            its own component directory (e.g. a shared certs/ at the
+#                            repo root) even though the real build context stays
+#                            scoped to that one component's own folder.
+#                            e.g. "cacerts=certs,cascripts=scripts"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Print a yellow-coloured message. Accepts >&2 redirect like a normal echo.
@@ -165,6 +173,35 @@ build_image() {
         context="${base}/${rel_path}"
     fi
 
+    # PLUGIN_EXTRA_BUILD_CONTEXTS: comma-separated name=path pairs (path relative to
+    # PLUGIN_BASE_PATH, same convention as rel_path itself) — passed to buildah as
+    # additional named --build-context entries, so a Dockerfile can
+    # `COPY --from=<name> <file> <dest>` from a shared top-level folder (e.g. certs/)
+    # even though the real build context is this one component's own folder. Lets a
+    # file that's genuinely shared across every component (a CA cert, an injector
+    # script) live in exactly one place instead of a copy per component folder.
+    local extra_context_args=""
+    if [ -n "${PLUGIN_EXTRA_BUILD_CONTEXTS:-}" ]; then
+        local ctx_pair ctx_name ctx_rel
+        while IFS= read -r ctx_pair; do
+            ctx_pair="$(printf '%s' "${ctx_pair}" | tr -d ' ')"
+            [ -z "${ctx_pair}" ] && continue
+            ctx_name="${ctx_pair%%=*}"
+            ctx_rel="${ctx_pair#*=}"
+            if [ "${ctx_name}" = "${ctx_pair}" ] || [ -z "${ctx_name}" ] || [ -z "${ctx_rel}" ]; then
+                yecho "WARN: PLUGIN_EXTRA_BUILD_CONTEXTS entry '${ctx_pair}' is not name=path — skipping." >&2
+                continue
+            fi
+            if [ "${base}" = "." ]; then
+                extra_context_args="${extra_context_args} --build-context ${ctx_name}=${ctx_rel}"
+            else
+                extra_context_args="${extra_context_args} --build-context ${ctx_name}=${base}/${ctx_rel}"
+            fi
+        done << CONTEXTS
+$(printf '%s' "${PLUGIN_EXTRA_BUILD_CONTEXTS}" | tr ',' '\n')
+CONTEXTS
+    fi
+
     local image_base
     if [ "${rel_path}" = "." ] || [ -z "${rel_path}" ]; then
         image_base="${registry}${repo:+/${repo}}"
@@ -183,6 +220,7 @@ build_image() {
     yecho "Log level : ${log}"
     yecho "Context   : ${context}"
     yecho "Dockerfile: ${context}/${dockerfile_name}"
+    yecho "Extra ctx : ${extra_context_args:-(none)}"
     yecho ">>> Generated tag : ${version_tag}"
     [ "${PLUGIN_DRY_RUN:-}" = "true" ] && yecho "  (dry-run — build only, no push)"
     yecho "================================================================"
@@ -192,6 +230,7 @@ build_image() {
         --log-level "${log}" \
         --file "${context}/${dockerfile_name}" \
         --tag "${version_tag}" \
+        ${extra_context_args} \
         "${context}"
 
     if [ "${PLUGIN_DRY_RUN:-}" = "true" ]; then

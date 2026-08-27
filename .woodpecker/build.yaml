@@ -71,8 +71,12 @@ steps:
     commands:
       - sh scripts/check-ca-injection.sh
 
+  # privileged: true is required — buildah's overlay/fuse-overlayfs mount needs
+  # /dev/fuse, which an unprivileged pod doesn't have (matches a-woodpecker-plugins'
+  # own publish.yml/pr.yml convention for the same buildah-master-versions image).
   - name: build-and-push
     image: harbor.devopstashtiot.page/inbound_images/plugins/buildah-master-versions:latest
+    privileged: true
     environment:
       PLUGIN_BASE_PATH: .
       PLUGIN_REGISTRY: harbor.devopstashtiot.page
@@ -90,14 +94,19 @@ steps:
       PLUGIN_PASSWORD:
         from_secret: harbor_password
 
+  # image: base/git-cert:prod (not plain alpine/git) — this repo's own clone step
+  # needed the same fix (see clone: above): bitbucket.devopstashtiot.page is
+  # served through the internal Cloudflare Origin CA, which alpine/git doesn't
+  # trust, so the push fails with "unable to get local issuer certificate".
   - name: commit-back
-    image: alpine/git
+    image: harbor.devopstashtiot.page/base/git-cert:prod
     environment:
       BITBUCKET_TOKEN:
         from_secret: bitbucket_token
     commands:
       - git config user.name "inbound-images-bot"
       - git config user.email "ci@devopstashtiot.page"
+      - git config --global safe.directory '*'
       - find . -name "VERSION.txt" -o -name "CHANGELOG.md" | grep -v '^\./\.git' | xargs -r git add
       - >-
         git diff --cached --quiet ||

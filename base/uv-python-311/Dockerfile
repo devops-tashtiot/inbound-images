@@ -1,6 +1,7 @@
 FROM docker.io/library/python:3.11-slim
 
 # Python 3.11 base with the uv package manager (pinned 0.11.29) installed via pip.
+# Retrigger: verify privileged build-and-push + CA-trusting commit-back pipeline fixes.
 COPY cloudflare-origin-ca-rsa-root.pem /tmp/cloudflare-origin-ca-rsa-root.pem
 COPY inject-ca.sh /tmp/inject-ca.sh
 RUN sh /tmp/inject-ca.sh && rm -f /tmp/inject-ca.sh /tmp/cloudflare-origin-ca-rsa-root.pem
